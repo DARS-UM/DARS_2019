@@ -1,0 +1,123 @@
+---
+title: "Web-scrapping"
+author: "DARS"
+date: "6/21/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Initial comments:
+This is a good resource to get a basic overview of webscrapping:
+https://stanford.edu/~vbauer/teaching/scraping.html#non-latin-alphabet-setup
+
+you can also follow this tutorial: 
+https://www.youtube.com/watch?v=NwtxrbqE2Gc
+
+Tip: use Selector Gadget extension to Chrome to fing CSS selectors easily.
+
+#Setup
+```{r libraries, message = FALSE}
+library(tidyverse)  # fata wrangiling
+library(rvest)      # scrapping
+library(stringr)    # string manipulation
+library(rebus)      # verbose regular expressions
+library(lubridate)  # date time manipulation
+library(tidytext)   # claning text for analysis
+```
+
+## Scrape text of migration page of european commision:
+For our web-crawled we will be scrapping the webpage of: https://ec.europa.eu/commission/priorities/migration_en
+
+#Get titles and paragraphs:
+Get titles, texts and urls:
+```{r}
+migration_areas <- read_html("https://ec.europa.eu/commission/priorities/migration_en")
+
+titles <- migration_areas %>%
+  #html_nodes(".listing__title") #this selects 1 more than below.
+  html_nodes("h3.listing__title") %>% 
+  #html_nodes("a.listing__item-link") %>% #this comes before h3 and breaks text code.
+  html_text() %>%
+  as.character()
+
+urls <- migration_areas %>%
+  html_nodes("a.listing__item-link") %>%
+  html_attr("href")%>%
+  as.character()
+
+text <- migration_areas %>%
+  html_nodes("h3.listing__title~*") %>% 
+  #html_nodes("a.listing__item-link~*") %>% 
+  html_text()%>%
+  as.character()
+
+migration_data_full <- tibble(Title = titles, Text = text, Page = urls)
+```
+For our first dig into the links, we keep only the urls we can access directly:
+```{r}
+migration_data <- migration_data_full[grep("http:", migration_data_full$Page),]
+print(dim(migration_data))
+migration_data
+```
+Loop through urls, grab main head and paragraph text of comments
+```{r loop extract second level}
+titles   <- c()
+text <- c()
+used_urls <- c()
+
+for(i in migration_data$Page){
+  
+  webpage_d <- read_html(i)
+  body <- webpage_d %>%
+    html_nodes("p") %>%
+    html_text()
+  text = append(text, body)
+  
+  title <- webpage_d %>%
+    html_node("title") %>%
+    html_text()
+  titles = append(titles, rep(title, each = length(body)))
+  used_urls = append(used_urls, rep(i, each = length(body)))
+}
+```
+
+#Creating tibble:
+Note that we lost two urls in the previous step.
+HYPOTHEIS: the content is organised differently (no division title or paragraph?)
+```{r second level tibble}
+second_level_data <- tibble(url = used_urls, Title= titles, Text = text)
+second_level_data 
+```
+###test hypothesis?
+```{r}
+missing_urls <- dplyr::setdiff(migration_data$Page, test$url)
+```
+indeed, clas p exists but not on its own.
+
+
+#Clean text:
+```{r tidy format}
+tidy_migration_data <- migration_data %>%
+  full_join(second_level_data, 
+            by = c("Page" = "url", "Title" = "Title", "Text" = "Text")
+            )%>% 
+  tidytext::unnest_tokens("Text", "Text") %>%
+  count(Title, Text) %>%
+  anti_join(stop_words, by = c("Text" = "word" ))
+
+tidy_migration_data
+```
+
+#Appendix
+##Useful functions
+###Return file types in a directory
+Source:https://stanford.edu/~vbauer/teaching/scraping.html#review-of-coding-languages
+```{r}
+list.files(pattern="\\.") %>% #get files with '.'
+    lapply(FUN=function(x) #cut the text after the '.`
+        substr(x,gregexpr("([^.]+$)", x)[[1]], nchar(x))) %>% 
+    unlist() %>% table() %>% as.matrix()
+```
+
