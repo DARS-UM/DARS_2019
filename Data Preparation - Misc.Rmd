@@ -2,6 +2,12 @@
 title: "Data Preparation"
 author: "DARS"
 date: "`r Sys.Date()`"
+knit: (function(inputFile, encoding) { 
+      out_dir <- 'md files';
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile),
+                         out_dir, 'DP misc.md')) })
 output: 
   github_document:
     toc: TRUE

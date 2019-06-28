@@ -2,6 +2,12 @@
 title: "Pillar 1 - Student Topic Profile"
 author: "DARS"
 date: "`r Sys.Date()`"
+knit: (function(inputFile, encoding) { 
+      out_dir <- 'md files';
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), out_dir,
+                         'WI GP RF.md')) })
 output: 
   github_document:
     toc: TRUE
@@ -27,6 +33,8 @@ load("Output/useful functions.RDATA")
 
 library(randomForest)
 library(tidyverse)
+library(xgboost)
+library(glmnet)
 
 load("Output/student_model.RDATA")
 load("Output/course_current.RDATA")
@@ -45,7 +53,7 @@ Consider courses currently on offer and with at least 20 enrollments since 2008
 ```{r}
 d_course <- tibble(target = course_current) %>%
   
-  mutate(student_model = target        %>% map(find_df),
+  mutate(student_model = target        %>% map(find_df, d_student_model),
          n             = student_model %>% map_dbl(nrow)) %>%
   
   filter(n > 20)
@@ -62,7 +70,7 @@ remove(app_model)
 # Extract sample of one course
 
 ```{r}
-{z <- find_df("HUM2025") %>%
+{z <- find_df("HUM2025", d_student_model) %>%
   select(Grade, matches("GPA|Topic"))
 
 n_sample <- nrow(z)

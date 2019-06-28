@@ -2,6 +2,12 @@
 title: "Data Preparation"
 author: "DARS"
 date: "`r Sys.Date()`"
+knit: (function(inputFile, encoding) { 
+      out_dir <- 'md files';
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile),
+                         out_dir, 'DP SD.md')) })
 output: 
   github_document:
     toc: TRUE
@@ -35,7 +41,7 @@ read_csv_own_parsing <- function(file) file %>% read_csv(col_types = col_parsing
 ```
 
 ```{r d_transcript, cache = TRUE}
-d_transcript <- paste0("Input/Raw Grades/grades", 1 : 2, ".csv") %>%
+d_transcript <- str_c("Input/Raw Grades/grades", 1 : 2, ".csv") %>%
   
   map(read_csv_own_parsing) %>%
   

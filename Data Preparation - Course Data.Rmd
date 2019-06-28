@@ -2,6 +2,12 @@
 title: "Data Preparation - Course Catalogues"
 author: "DARS"
 date: "`r Sys.Date()`"
+knit: (function(inputFile, encoding) { 
+      out_dir <- 'md files';
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile),
+                         out_dir, 'DP CD.md')) })
 output: 
   github_document:
     toc: TRUE
@@ -90,7 +96,7 @@ read_in_pdfs <- function(file){
 d_text <- list()
 ```
 
-```{r d_text$catalogues}
+```{r d_text$catalogues, cache = TRUE}
 d_text$catalogues <- tribble(
   ~ ID              ,  ~ page_top                  , ~ before_overview                       ,
   "European_studies", "^.Bachelor European Studies", "Faculty of Arts and Social Sciences"   ,
@@ -106,7 +112,7 @@ d_text$catalogues <- tribble(
   rename(catalogue = text)
 ```
 
-```{r d_text$manuals}
+```{r d_text$manuals, cache = TRUE}
 d_text$manuals <- read_in_pdfs("./Input/Manuals 2017-18") %>%
   rename(`Course ID` = ID) %>%
   mutate(text = text %>% map_chr(str_c, collapse = " "))

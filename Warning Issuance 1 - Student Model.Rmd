@@ -2,6 +2,12 @@
 title: "Pillar 1 - Student Topic Profile"
 author: "DARS"
 date: "`r Sys.Date()`"
+knit: (function(inputFile, encoding) { 
+      out_dir <- 'md files';
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile),
+                         out_dir, 'WI SM.md')) })
 output: 
   github_document:
     toc: TRUE
@@ -20,7 +26,7 @@ __Considerations__:
      
 # Set up
 
-```{r setup, include = FALSE}
+```{r setup}
 
 knitr::opts_chunk$set(cache.path = "Cache/Warning Issuance/")
 knitr::opts_chunk$set(fig.path = "Cache/Figures/")
@@ -40,7 +46,7 @@ remove(app_model)
 ```
 
 # Students' Topic Expertise
-```{r student_TP} 
+```{r student_TP, cache = TRUE} 
 student_TP <- d_transcript_augmented %>%
   left_join(gamma_spread, by = c("Course ID" = "document")) %>%
   

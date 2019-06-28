@@ -3,7 +3,7 @@ title: "Pillar 1 - Student Topic Profile"
 author: "DARS"
 date: "`r Sys.Date()`"
 knit: (function(inputFile, encoding) { 
-      out_dir <- 'rm files';
+      out_dir <- 'md files';
       rmarkdown::render(inputFile,
                         encoding=encoding, 
                         output_file=file.path(dirname(inputFile), out_dir,
@@ -115,7 +115,7 @@ save(d_lasso_app, file = "APP/Recommender System/d_lasso_app.RDATA")
 ## Explore results
 
 ### CV MAE
-```{r}
+```{r, eval = FALSE}
 d_lasso %>%
   ggplot() +
   geom_histogram(aes(cv_error), bins = 14) +
