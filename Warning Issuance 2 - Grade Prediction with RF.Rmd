@@ -1,0 +1,121 @@
+---
+title: "Pillar 1 - Student Topic Profile"
+author: "DARS"
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: TRUE
+editor_options: 
+  chunk_output_type: console
+---
+
+__Considerations__:
+
+* extract course descriptions from courses not offer in 2018-2019 e.g. SCI2012.
+
+* give more weight to 3000-level courses
+
+* restrict prep courses to UCM courses
+     
+# Set up
+
+```{r setup, include = FALSE}
+
+knitr::opts_chunk$set(cache.path = "Cache/Warning Issuance/")
+knitr::opts_chunk$set(cache.fig  = "Cache/Figures/")
+load("Output/useful functions.RDATA")
+
+library(randomForest)
+library(tidyverse)
+
+load("Output/student_model.RDATA")
+load("Output/course_current.RDATA")
+load("Output/app_model.RDATA")
+```
+
+# Data
+
+Remove course enrollments from 2007 from the student model because we have no information on the previous course enrolment of these students, hence no data on their previous academic performance and skills acquired in previous courses.
+
+```{r}
+d_student_model <- d_student_model %>% filter(Year_numerical != 2007)
+```
+
+Consider courses currently on offer and with at least 20 enrollments since 2008 
+```{r}
+d_course <- tibble(target = course_current) %>%
+  
+  mutate(student_model = target        %>% map(find_df),
+         n             = student_model %>% map_dbl(nrow)) %>%
+  
+  filter(n > 20)
+```
+
+Beta of topic model to inspect results
+```{r}
+beta  <- app_model$Beta[[1]] %>% group_by(topic) %>% top_n(10, beta)
+gamma <- app_model$Gamma[[1]] %>%  mutate(topic = topic %>% str_replace(" ", "_"))
+remove(app_model)
+```
+
+
+# Extract sample of one course
+
+```{r}
+{z <- find_df("HUM2025") %>%
+  select(Grade, matches("GPA|Topic"))
+
+n_sample <- nrow(z)
+n_train  <- floor(0.67 * n_sample)
+n_test   <- n_sample - n_train 
+
+allocation <- sample(rep(c("train", "test"), times = c(n_train, n_test)))
+z <- z %>% mutate(allocation = allocation)
+z_train <- z %>% filter(allocation == "train") %>% select(-allocation)
+z_test  <- z %>% filter(allocation == "test" ) %>% select(-allocation)} # prepare sample
+```
+
+# Grade prediction
+```{r}
+assess_prediction <- function(test_set = z_test, predictions){
+  
+  test_set <- test_set %>% mutate(y_hat = predictions,
+                                  res = Grade - y_hat)
+
+ # hist(test_set$y_hat)
+#  plot(test_set$y_hat, test_set$res)
+#  plot(test_set$Grade, test_set$res)
+  plot(test_set$Grade, test_set$y_hat)
+  
+  mae <- test_set$res %>% abs %>% mean
+  print(str_c("MAE: ", mae %>% round(2)))
+  
+}
+```
+
+```{r}
+# data
+x <- z_train %>% select(matches("Topic|GPA")) %>% as.matrix
+y <- z_train %>% pull(Grade)
+x_test <- z_test %>% select(matches("Topic|GPA"))
+
+# Boost
+m_boost <- xgboost(data = x, label = y,
+                   max_depth = 2, eta = .3, subsample = 1, nrounds = 1000, colsample_bytree = .5,
+                   objective = "reg:linear")
+y_boost <- predict(m_boost, as.matrix(x_test))
+assess_prediction(predictions = y_boost)
+
+# RF
+m_RF <- randomForest(as.matrix(x), y,
+                     ntree = 1000, mtry = floor(ncol(z_train)/3))
+
+y_rf <- predict(m_RF, as.matrix(x_test))
+assess_prediction(predictions = y_rf)
+
+
+m_lasso <- cv.glmnet(as.matrix(x), y,
+                     nfolds = 10, type.measure = "mae")
+y_lasso <- predict(m_lasso, newx = as.matrix(x_test), s="lambda.min")
+assess_prediction(predictions = y_lasso)
+```
