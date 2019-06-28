@@ -1,18 +1,8 @@
-
-\begin{tabular}{cccc}
-\toprule
-Course ID & Course Title & Department & word\\
-\midrule
-HUM3034 & World History & UCM & understand\\
-HUM3034 & World History & UCM & major\\
-HUM3034 & World History & UCM & issue\\
-HUM3034 & World History & UCM & episode\\
-HUM3034 & World History & UCM & shape\\
-\addlinespace
-HUM3034 & World History & UCM & history\\
-HUM3034 & World History & UCM & mankind\\
-HUM3034 & World History & UCM & focus\\
-HUM3034 & World History & UCM & theme\\
-HUM3034 & World History & UCM & topic\\
-\bottomrule
-\end{tabular}
+version https://git-lfs.github.com/spec/v1
+<<<<<<< HEAD
+oid sha256:8d1bd3cd7b41f56f821a10dd2ebbbe03f192accac375f2248295641b6901d9c3
+size 910
+=======
+oid sha256:006f87c7d3aa0cca162c80c39ec04053b112d258d419f2f2741c61aeeb43843f
+size 539
+>>>>>>> 883daa76f70c8cc4ca68c7ff6118ef0ae144b1a4
