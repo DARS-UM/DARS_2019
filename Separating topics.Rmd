@@ -1,0 +1,555 @@
+---
+title: "Text analysis- Splitting topics in content and methods"
+author: "DARS"
+date: "6/17/2019"
+output: html_document
+---
+#Setup
+we will need:
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library("Rtsne")
+library("neuralnet") # Warning: masks 'compute' from dplyr
+library(dbscan) #dbscan algorithm
+```
+An output of our analysis has been the distribution of topics in courses. Some of the topics are form related (papers, skills, period, etc.) whilst others are content related (american, foreign, policy, etc). One of the problems encountered in the classification when using historical data of students, is that profiles tend to score highly on form topics, and recomendations include a lot of skills or projects whilst leaving out some of the content courses. This makes recommendations less personalised (results are quite similar for everyone regardless of their profile). Whilst recomendations based on taeaching format are still important, we would like to be able to filter these topics out. The research question possed in this investigation is: can we separate our topic models into two separate clusters: one with (form) and the other with content.
+
+##Loading topic data
+```{r}
+#Training data:
+load("App/Recommender System/app_model.RDATA")
+beta_distribution <- app_model$Beta[[1]] #this is the one we need
+
+#Extension data:
+load("App/Recommender System/app_stm.RDATA")
+beta_distribution_test <- app_stm$Beta[[1]]
+
+#gamma_distribution <- app_model$Gamma
+load("Output/data_student.RDATA")
+```
+We extract the necessary matrix to train our algorithms, and manually assign labels as either content of form topic to compare. We hope that this exercise of manually labeling data can be avoided in the future by using this as a training set to classify new topics. 
+##Manual labeling
+We inspect the topics and look at which of them seem to be form related:
+```{r}
+inspection_data <- beta_distribution %>% 
+  group_by(topic) %>% 
+  top_n(10, beta) %>% 
+  mutate(terms = paste(term, collapse = ", ")) %>% 
+  select(topic, terms) %>% 
+  unique()
+
+inspection_data
+```
+it seems that the following nineteen topics are form related: 12,10,20, 21, 23, 24, 26, 28, 3, 31, 36, 39, 44, 45, 48, 47, 53, 60, 63.
+
+We label our data:
+```{r}
+beta_matrix <- beta_distribution %>% mutate(Topic = as.factor(topic)) %>% select(-topic) %>% group_by(Topic) %>% spread(key = term, value = beta) %>% ungroup()
+
+train_data <- beta_matrix %>% select(-Topic)
+  
+form_topics <- c(12,10,20, 21, 23, 24, 26, 28, 3, 31, 36, 39, 44, 45, 48, 47, 53, 60, 63)
+form_topics <- paste("Topic ", form_topics, sep = "")
+
+beta_matrix_labeled <- beta_matrix %>% 
+  mutate(Class = case_when(Topic %in% form_topics ~ "form",
+                                      T~ "content")) %>%
+  select(Topic, Class,everything())
+
+#WARNING: Mangling the following names: br<U+00FC>ll -> br<U+00FC>ll, d<U+00FC>cker -> d<U+00FC>cker, dili<U+00EB>n -> dili<U+00EB>n, eu<U+2019>s -> eu<U+2019>s, europe<U+2019>s -> europe<U+2019>s, m<U+00FC>ller -> m<U+00FC>ller, na<U+00EF>ve -> na<U+00EF>ve, parkinson<U+2019>s -> parkinson<U+2019>s, r<U+00F6>mgens -> r<U+00F6>mgens, theorie<U+00EB>n -> theorie<U+00EB>n, vendler<U+2019>s -> vendler<U+2019>s. Use enc2native() to avoid the warning.
+
+topics_content <- beta_matrix_labeled %>% filter(Class == "content") %>% pull(Topic) %>% as.character()
+topics_form    <- beta_matrix_labeled %>% filter(Class == "form") %>% pull(Topic) %>% as.character()
+```
+##Training and testing sets
+We create some training and testing sets, for our supervised training algorithms:
+```{r}
+set.seed(42)
+
+training_topics_form <- sample(topics_form, round(length(topics_form)*0.9))
+training_topics_content <- sample(topics_content, round(length(topics_content)*0.9))
+
+training_topics <- c(training_topics_content, training_topics_form)
+training_topics
+
+#training set
+training_beta_matrix <- beta_matrix %>% filter(Topic %in% training_topics)
+
+#testing set
+test_beta_matrix     <- beta_matrix %>% filter(!(Topic %in% training_topics))
+```
+We will train each of our superviced algorithms models twice: once on the training set and once on the full data.
+The model built on training data will be used to predict labels on the test set and will be used for comparison in the future.
+
+#Unsupervised:
+##K-means
+K-means is unsupervised, therefore we only train the full set.
+```{r}
+#K-means with two topics:
+k2 <- stats::kmeans(beta_matrix %>% select(-Topic), centers = 2, nstart = 10)
+Clustered_topics <- tibble(Topic = beta_matrix %>% pull(Topic), Cluster = k2$cluster)
+```
+
+Join with labels and see assignation:
+```{r}
+clustered_w_labels <- Clustered_topics %>% 
+  mutate(Class = case_when(Topic %in% topics_form ~ "form",
+                                      T~ "content"))
+
+table(clustered_w_labels$Cluster, clustered_w_labels$Class)
+```
+From this we guess that class 1 is content and class 2 is form.
+
+###Computing metrics:
+We consider "form" to be our positives.
+```{r}
+#Correspondance key of cluster lables
+label_key <- clustered_w_labels  %>%
+  group_by(Cluster)              %>% 
+  count(Class)                   %>% 
+  spread(key = Class, value = n) %>% 
+  mutate(
+    Label = case_when(content >= form~ "content",
+                      T ~ "form")) %>%
+  select(Cluster, Label)
+
+#labeling function:
+label_cluster <- function(cluster){
+  label_key %>% filter(Cluster == cluster) %>% pull(Label)
+}
+
+#hit  (TP, TN, FP, FN) labeling function:
+assign_hit_case <- function(clustered_w_labels){
+  clustered_w_labels %>% 
+  mutate(Cluster_label = sapply(Cluster, label_cluster)) %>%
+  mutate(
+    Match = case_when(
+    Class == Cluster_label ~ T,
+    T ~ F),
+    Assignation_category = case_when(
+      (Class=="form") & (Cluster_label == "form") ~ "TP",
+      (Class=="content" & Cluster_label == "content") ~ "TN",
+      (Class=="form" & Cluster_label == "content") ~ "FN",
+      (Class=="content" & Cluster_label == "form") ~ "FP",
+      T~ "ERROR"
+    ))
+}
+
+labels_for_matrics <- assign_hit_case(clustered_w_labels)
+
+#count the labels:
+count_labels <- function(labels_for_matrics){
+  labels_for_matrics %>% select(Assignation_category) %>%
+  group_by(Assignation_category) %>% count
+}
+
+counts_for_matrics <- count_labels(labels_for_matrics)
+
+compute_matrics <-  function(counts_for_matrics){
+  counts_for_matrics %>% spread(key = Assignation_category, value = n) %>%
+    transmute(Accuracy = (TP+TN)/(TP+TN+FP+FN),
+              Sensitivity = TP/(TP+FN),
+              Specificity = TN/(TN+FP),
+              Positive_predictive_value =  TP/(TP+FP),
+              Negative_predictive_value = TN/(TN+FN),
+              Fallout = FP/(FP+TN)) %>%
+    gather(key = "Metric", value = "value")
+}
+```
+compute metrics:
+```{r}
+k2_metrics <- compute_matrics(counts_for_matrics)
+```
+##All Metrics f()
+```{r}
+compute_metrics_full <- function(model){
+  clustered_w_labels <- tibble(Topic = beta_matrix %>% pull(Topic), Cluster = model$cluster) %>%
+    mutate(Class = case_when(Topic %in% topics_form ~ "form",
+                             T~ "content")
+    )
+  
+  #Correspondance key of cluster lables
+  label_key <- clustered_w_labels  %>%
+    group_by(Cluster)              %>% 
+    count(Class)                   %>% 
+    spread(key = Class, value = n) %>% 
+    mutate(
+      Label = case_when(content >= form ~ "content",
+                        T ~ "form")) %>%
+    select(Cluster, Label)
+  
+  #label function
+  label_cluster <- function(cluster){
+    label_key %>% filter(Cluster == cluster) %>% pull(Label) #is this from the internal space?????????
+  }
+  
+  #hit  (TP, TN, FP, FN) labeling function:
+  assign_hit_case <- function(clustered_w_labels){
+    clustered_w_labels %>% 
+      mutate(Cluster_label = sapply(Cluster, label_cluster)) %>%
+      mutate(
+        Match = case_when(
+          Class == Cluster_label ~ T,
+          T ~ F),
+        Assignation_category = case_when(
+          (Class=="form") & (Cluster_label == "form") ~ "TP",
+          (Class=="content" & Cluster_label == "content") ~ "TN",
+          (Class=="form" & Cluster_label == "content") ~ "FN",
+          (Class=="content" & Cluster_label == "form") ~ "FP",
+          T~ "ERROR"
+        ))
+  }
+  
+  labels_for_metrics <- assign_hit_case(clustered_w_labels)
+  
+  #count the labels function
+  count_labels <- function(labels_for_metrics){
+    labels_for_metrics %>% select(Assignation_category) %>%
+      group_by(Assignation_category) %>%
+      count %>%
+      ungroup()
+  }
+  
+  counts_for_metrics <- count_labels(labels_for_metrics)
+  
+  #Compute Metrics Function:
+  compute_metrics <-  function(counts_for_metrics){
+    #Handles case of no TP (or TN/FP/FN) found:
+    if(length(counts_for_metrics$Assignation_category)!= 4){  
+      not_present <- setdiff(c("TP", "TN", "FP", "FN"), counts_for_metrics$Assignation_category)
+      
+      for(i in 1:length(not_present)){
+        counts_for_metrics <- add_row(counts_for_metrics, Assignation_category = not_present[i], n = as.integer(0))
+      }
+    }
+    
+   #Final computation of metrics:
+    counts_for_metrics %>% spread(key = Assignation_category, value = n) %>%
+      transmute(Accuracy = (TP+TN)/(TP+TN+FP+FN),
+                Sensitivity = TP/(TP+FN),
+                Specificity = TN/(TN+FP),
+                Positive_predictive_value =  TP/(TP+FP),
+                Negative_predictive_value = TN/(TN+FN),
+                Fallout = FP/(FP+TN)) %>%
+      gather(key = "Metric", value = "value")
+  }
+  
+  #Apply and return value:
+  compute_metrics(counts_for_metrics)
+}
+
+#checking
+compute_metrics_full(k2)
+```
+It doesn't seem like we have a great model, we have an accuracy of 75% and around 2% of the topics are classified as form when they are not. However, if upon inspection, we see that the form cluster topics are indeed related to methods or format:
+```{r}
+cluster <- label_key %>% filter(Label == "form") %>% pull(Cluster)
+
+check_out <- clustered_w_labels %>% filter(Cluster == cluster) %>% pull(Topic)
+
+inspection_data %>% filter(topic %in% check_out) 
+```
+We can try to see what happens if we have more clusters:
+```{r}
+ks <- 1:35
+
+tot_within_ss <- sapply(ks, function(k) {
+  cl <- stats::kmeans(train_data, k, nstart = 10)
+  cl$tot.withinss
+})
+
+plot(ks, tot_within_ss, type = "b")
+
+```
+Well, that did not go great, the sum of squares keeps going down without a clear cut. However, at around 3 there slope starts decreasing less rapidly. Let's check that out.
+
+```{r}
+k3 <- stats::kmeans(train_data, 3, nstart = 10)
+k3_tibble <- tibble(Topic = beta_matrix %>% pull(Topic), Cluster = k3$cluster) %>% 
+  mutate(Class = case_when(Topic %in% form_topics ~ "form",
+                                      T~ "content")) 
+#confusion table:
+table(k3_tibble$Cluster, k3_tibble$Class)
+
+#inspection
+check_out <- k3_tibble %>% filter(Cluster == 2) %>% pull(Topic)
+inspection_data %>% filter(topic %in% check_out) 
+
+```
+
+Hmmm, not much better, it takes topic 42 out which is something to do with ethnography:
+```{r}
+inspection_data %>% filter(topic == "Topic 42") 
+```
+
+Let's try a different clustering algorithm:
+
+##DBSCAN
+We would like to try out DBSCAN. For this we need to determine epsilon which determines the size of the neighbourhoud. 
+According to https://www.aaai.org/Papers/KDD/1996/KDD96-037.pdf section 4.2 in order to approximate which value to choose for epsilon, we define a 'distance' function that returns the distance of each point to it's k nearest neighbour.
+```{r}
+test <- dist(beta_matrix %>% select(-Topic))
+mean(test)
+hist(test, breaks = 30)
+
+kdist_calculate <- function(dist_obj, k){
+  
+  test_matrix <- as.matrix(dist_obj)
+  test_df     <- as.data.frame(test_matrix) %>% mutate_all(funs(rank))
+  index       <- test_df %>% transmute_all(funs(which(. == k))) %>% unique() #first neighbour (we select 2 since rank 1 would be itself for each topic)
+  
+  df <- as.data.frame(test_matrix)
+  k_dist <- vector()
+  
+  for (i in 1:ncol(df)){
+    x <- df[i]
+    ind <- as.numeric(index[i])
+    k_dist<-c(k_dist, x[ind,1])
+  }
+  
+  k_dist
+  
+}
+
+kdist_calculate(test, 5)
+
+```
+In the article: "For a given k we define a function k-dist fromthe database Dto the real numbers,mappingeach point to the distance fromits k-th nearest neighbor. Whensorting the points of the databasein descendingorder of their k-dist values, the graph of this function gives somehints concerningthe density dis- tribution in the database.Wecall this graphthe sortedk-dist graph. If wechoose an arbitrary point p, set the parameter Epsto k-dist(p) and set the parameterMinPtsto k, all points with an equal or smaller k-dist value will be core points. If wecouldfindathresholdpointwiththemaximakl-distval- ue in the "thinnest" cluster of D we wouldhave the desired parametervalues. Thethresholdpoint is the first point in the first "valley" of the sorted k-dist graph(see figure 4). All points with a higher k-dist value ( left of the threshold) are considered to be noise, all other points (right of the thresh- old) are assignedto some cluster."
+```{r}
+distance <- kdist_calculate(test, 5)
+
+tibble(Topic = 1:65, Distance = distance) %>% arrange(desc(Distance)) %>% mutate(Point = 0:64) %>%
+  ggplot(aes(x = Point, y = Distance))+
+  geom_point()
+  
+```
+The elbow seems to be on the nineth, point, which has a distance of around 0.196:
+```{r}
+tibble(Topic = 1:65, Distance = distance) %>% arrange(desc(Distance)) %>% mutate(Point = 0:64) %>% filter(Point == 9)
+```
+let's use that as epsilon.
+```{r}
+dbscan_196 <- dbscan::dbscan(beta_matrix %>% select(-Topic), eps = 0.196, minPts = 5)
+```
+
+A rougher approximation is as follows:
+```{r}
+test <- dist(beta_matrix %>% select(-Topic))
+mean(test)
+```
+
+The mean is 0.196623 so lets use 0.19 as eps parameter
+```{r}
+dbscan_19 <- dbscan::dbscan(beta_matrix %>% select(-Topic), eps = 0.19, minPts = 5)
+```
+
+Now let's compute our metrics. 
+Repeating process as above:
+```{r}
+clustered_w_labels <- tibble(Topic = beta_matrix %>% pull(Topic), Cluster = dbscan_19$cluster) %>%
+   mutate(Class = case_when(Topic %in% topics_form ~ "form",
+                                      T~ "content"))
+
+table(clustered_w_labels$Cluster, clustered_w_labels$Class)
+```
+
+This is not great, two of our content topics get classified as form topics and 11 of our form topics get classified as content. Continuing the process of kmeans:
+```{r}
+#Correspondance key of cluster lables
+label_key <- clustered_w_labels  %>%
+  group_by(Cluster)              %>% 
+  count(Class)                   %>% 
+  spread(key = Class, value = n) %>% 
+  mutate(
+    Label = case_when(content >= form~ "content",
+                      T ~ "form")) %>%
+  select(Cluster, Label)
+
+#labeling function:
+label_cluster <- function(cluster){
+  label_key %>% filter(Cluster == cluster) %>% pull(Label)
+}
+
+#hit  (TP, TN, FP, FN) labeling function:
+assign_hit_case <- function(clustered_w_labels){
+  clustered_w_labels %>% 
+  mutate(Cluster_label = sapply(Cluster, label_cluster)) %>%
+  mutate(
+    Match = case_when(
+    Class == Cluster_label ~ T,
+    T ~ F),
+    Assignation_category = case_when(
+      (Class=="form") & (Cluster_label == "form") ~ "TP",
+      (Class=="content" & Cluster_label == "content") ~ "TN",
+      (Class=="form" & Cluster_label == "content") ~ "FN",
+      (Class=="content" & Cluster_label == "form") ~ "FP",
+      T~ "ERROR"
+    ))
+}
+
+labels_for_metrics <- assign_hit_case(clustered_w_labels)
+```
+Lets inspect which topics get miscategorised:
+```{r}
+fp_topics <- labels_for_metrics %>% filter(Assignation_category == "FP") %>% pull(Topic)
+fn_topics <- labels_for_metrics %>% filter(Assignation_category == "FN") %>% pull(Topic)
+
+print("False positives are:")
+print(inspection_data %>% filter(topic %in% fp_topics))
+
+print("False negatives are:")
+print(inspection_data %>% filter(topic %in% fn_topics))
+
+```
+Our false positives are bad, they include a topic on law, and a topic on ethnography! It is dangerous to filter these out.
+
+Let's inspect our true positives:
+```{r}
+tp_topics <- labels_for_metrics %>% filter(Assignation_category == "TP") %>% pull(Topic)
+print(inspection_data %>% filter(topic %in% tp_topics))
+```
+
+Computing our metrics:
+```{r}
+#count the labels:
+count_labels <- function(labels_for_metrics){
+  labels_for_metrics %>% select(Assignation_category) %>%
+  group_by(Assignation_category) %>% count
+}
+
+counts_for_metrics <- count_labels(labels_for_metrics)
+
+compute_metrics <-  function(counts_for_metrics){
+  counts_for_metrics %>% spread(key = Assignation_category, value = n) %>%
+    transmute(Accuracy = (TP+TN)/(TP+TN+FP+FN),
+              Sensitivity = TP/(TP+FN),
+              Specificity = TN/(TN+FP),
+              Positive_predictive_value =  TP/(TP+FP),
+              Negative_predictive_value = TN/(TN+FN),
+              Fallout = FP/(FP+TN)) %>%
+    gather(key = "Metric", value = "value")
+}
+
+compute_metrics(counts_for_metrics)
+```
+
+This one seems to be mode accurate, however, it has lower specificity which is dangerous, as we saw that our law topic got misclassified!
+```{r}
+x <- compute_metrics_full(dbscan_19)
+y <- compute_metrics_full(k2)
+
+z <- compute_metrics_full(dbscan_196)
+
+print(full_join(x, y, by = "Metric"))
+print(full_join(x, y, by = "Metric"))
+rm(x,y,z)
+```
+##Hierarchical Clustering
+```{r}
+distance_matrix <- dist(train_data)
+hierarchical_cluster <- hclust(distance_matrix)
+
+tibble(Topic = beta_matrix %>% pull(Topic), Cluster = cutree(hierarchical_cluster, k = 2))
+```
+That did even worse, it simply assigned topic 42 to a different cluster. 
+To be consistent with our approach:
+```{r}
+h_cluster_model <- list(cluster = cutree(hierarchical_cluster, k = 2))
+
+compute_metrics_full(h_cluster_model)
+```
+We have a low accuracy and a specificity of 0 because it didn't find a single correct case!
+
+increasing k to 3 doesnt do much better, it takes out topics 2 topis(23 and 42) by just assigning them to a separate clusters:
+```{r}
+x <- tibble(Topic = beta_matrix %>%
+              pull(Topic), Cluster = cutree(hierarchical_cluster, k = 3)) %>% 
+  mutate(Class = case_when(Topic %in% topics_form ~ "form",
+                                                 T~ "content"))
+
+print(table(x$Cluster, x$Class))
+
+rm(x)
+```
+Let's try something different:
+##Intermediate Conclusions:
+From unsupervised learining it hclustering doesn't seem to do the trick. Both k-means and DBSCAN seem to be better options. Although DBSCAN also did not do particularily well, because it just detected "outliers".
+##mini inspection with STM topics:
+```{r}
+inspection_data <- beta_distribution_test %>% 
+  group_by(topic) %>% 
+  top_n(10, beta) %>% 
+  mutate(terms = paste(term, collapse = ", ")) %>% 
+  select(topic, terms) %>% 
+  unique()
+
+inspection_data
+```
+Oh wow! looking at these topics it seems that we indeed have nicer topics, however, there seems to be less distinction between the form and content! This is worth exploring in more detail. Why should this make for worse recommendations?
+
+#Supervised:
+##PCA
+```{r}
+pca <- prcomp(train_data)
+summary(pca)
+```
+Works terribly, we capture only 8% of the data with the first PC.
+
+##tsne
+```{r}
+tsne <- Rtsne(train_data, perplexity = 21) #perplexity = 21
+
+plot(tsne$Y)
+
+tsne_to_plot <- as.tibble(tsne$Y) %>% mutate(Class = k3_tibble$Class,Topic = k3_tibble$Topic )
+ggplot(tsne_to_plot, aes(x = V1, y = V2, col = Class))+
+  geom_point()
+```
+
+##Artificial Neural Network
+Let's try something else:
+```{r, eval = F}
+
+data <- beta_matrix_labeled %>% select(-Topic)
+names_data <- names(data)
+
+names(data) <- c("Class", 2:3347)
+
+neuralnet(Class ~ paste(2:3347, collapse = " + ") , data = data)
+
+neuralnet(Class ~ ., data = data)
+
+
+```
+Hmmm... I get an error...
+
+Lets create some synthetic data to see why things are going wrong:
+```{r, eval = F}
+Class <- c(rep("bunny", 5), rep("dog",4), rep("cat",6))
+
+s1 <-  rnorm(5, mean = 3, sd = 0.5)
+s2 <-  rnorm(4, mean = 8, sd = 3)
+s3 <-  rnorm(6, mean = 5, sd = 2)
+
+w1 <-  rnorm(5, mean = 30,  sd = 5)
+w2 <-  rnorm(4, mean = 800, sd = 100)
+w3 <-  rnorm(6, mean = 400, sd = 50)
+
+h1 <-  rnorm(5, mean = 10, sd = 5)
+h2 <-  rnorm(4, mean = 15, sd = 3)
+h3 <-  rnorm(6, mean = 20, sd = 10)
+
+animals <- tibble(Class  = Class, 
+                  Size   = round(c(s1,s2,s3),2),
+                  Weight = round(c(w1,w2,w3),2),
+                  Height = round(c(h1,h2,h3),2))
+
+animals <- animals[sample(nrow(animals)),]
+
+```
+
+```{r, eval = F}
+neuralnet(Class~., data = animals)
+```
+hmmm... this works, i cannot figure out why the other part doesn't
