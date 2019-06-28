@@ -1,0 +1,731 @@
+---
+title: "Pillar 2 - (STM) Topic Modeling"
+author: "DARS"
+date: "`r Sys.Date()`"
+output: 
+  github_document:
+    toc: TRUE
+---
+The following is for experimentation (the workspace image):
+```{r, eval = F}
+#load("~/Documents/DARS/GitDARS/tmp_workspace.RData")
+```
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(cache.path = "Cache/Pillar 2/",
+                      eval = FALSE)
+```
+
+#Setup
+##Libraries
+```{r library, message = FALSE, eval = FALSE}
+library(tidyverse)
+library(tidytext)
+
+#Topic Models
+library(stm)
+library(topicmodels)
+library(quanteda) #used for DTM implementation called dfm
+
+library(ggwordcloud) # Word Clouds
+
+library(lemon)
+library(ggthemes)
+library(rlang) #quote
+library(ldatuning) # ideal number of topics in LDA
+
+```
+
+##Loading data
+We load a list `d_text` with two tibbles of textual data for catalogues and manuals. That is, for $catalogues and $manuals we have a tibble with the following columns: `Course ID`, `year`, `word_original`, `word`.
+
+We also load the environment `Output/data_pillar_2.RDATA` containing the data sets`d_course` and `d_transcript` that we will need to prepare some imputs for our App.
+```{r import data, eval = FALSE}
+#load
+load("./Output/d_text.RDATA")
+load("./Output/data_pillar_2.RDATA") #used for app
+```
+##Helpers
+###Preparation uniform course labels
+First we extract a tibble `course_titles` containing unique combinations of `Course ID`, `Course Title` and `department`.
+The vector empty_titles retaines the information for courses without course titles. 
+```{r course titles, eval = FALSE}
+#Clean titles
+course_titles <-  d_text$catalogues %>%
+  select(`Course ID`, `Course Title`, department) %>% 
+  distinct
+
+empty_titles <- course_titles %>% filter(`Course Title` == "")
+```
+We do not have the course codes for all courses, in that case we use the course titles as identifiers. However, for more pleasant display to the user, we make course labels uniform:  for unknown codes we give the label "unknown" and attatch the title as title. 
+```{r attatch titles}
+uniform_course_labels <- course_titles %>% mutate(`c_title`= case_when(is.na(`Course Title`) ~ `Course ID`,
+                                              T ~ `Course Title`),
+                         `Course ID` = case_when(str_length(`Course ID`) == 7 ~ `Course ID`,
+                                                 T ~ "unknown"),
+                         `Course Title` = c_title
+                         ) %>% select(-c_title)
+```
+
+###Functions for internal faceting
+```{r function reorder_within & co., echo = FALSE, eval = FALSE}
+
+# Function for ordering within facet:
+# https://github.com/dgrtwo/drlib/blob/master/R/reorder_within.R
+
+reorder_within <- function(x, by, within, fun = mean, sep = "___", ...) {
+  new_x <- paste(x, within, sep = sep)
+  stats::reorder(new_x, by, FUN = fun)
+}
+
+scale_x_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_x_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+
+scale_y_reordered <- function(..., sep = "___") {
+  reg <- paste0(sep, ".+$")
+  ggplot2::scale_y_discrete(labels = function(x) gsub(reg, "", x), ...)
+}
+```
+
+# STM
+##Setup
+###Cast DTM
+The function `my_cast_dtm` casts our dataframes into a DTM (dfm from package quanteda)
+```{r my_cast_dtm, eval = FALSE}
+my_cast_dtm <- function(data) data %>%
+  count(`Course ID`, word) %>%
+  cast_dfm(`Course ID`, word, n)
+
+d_cast <- d_text %>% map(my_cast_dtm)
+
+rm(my_cast_dtm)
+```
+###Add covariate information
+TO DO: setting covariates should be done in text cleaning
+To make use of extra information, we would like our STM to work with covariates. In this case we have information about the department at which the course is ofered (for the catalogues), and the concentration of a course (for the manuals).
+
+In order to add covariate information we need to make sure that the covariates appear in the same order as the documents in our DTM, therefore, we align the covariate information with document names. 
+
+Note: For the manuals we set the department = course_concentration, otherwise there is no variation with the department and STM does not run. 
+
+```{r covariates, eval = FALSE}
+#Set department for UCM
+d_text$manuals <- d_text$manuals %>% 
+  mutate(department = map_chr(`Course ID`, str_sub, 1,3)) #department has "UCM" as single value, it therefore doesn't work as covariate
+
+#Align documents to DTM order:
+align_documents <- function(text_type) {tibble(`Course ID` = text_type@Dimnames$docs)}
+aligned_documents <- map(d_cast, align_documents)
+
+#Align covariates
+covariates <- list(catalogues = NULL, manuals =NULL)
+
+for(i in 1:length(aligned_documents)){
+  
+  documents <- aligned_documents[[i]]
+  
+  covariates[[i]] <- d_text[[i]] %>%
+    distinct(`Course ID`, department) %>%
+    mutate(department = factor(department)) %>% 
+    right_join(documents, by = "Course ID") %>% 
+    select(department)
+}
+
+#set covariates
+for(i in 1:length(covariates)){
+  docvars(d_cast[[i]]) <- covariates[[i]]
+}
+```
+
+###STM Corpus
+We convert our DTMs into STM corpus to access to full functionality in STM package.
+```{r stm corpus, eval = FALSE}
+#stm corpus
+stm_corpus <- d_cast %>% map(asSTMCorpus)
+
+```
+
+###Functions
+####STM functions
+The function `my_stm` fits an STM model on the DTM.
+```{r my_STM, eval= TRUE}
+my_stm <- function(n_topics, corpus){ #, data
+  STM_model <- stm(corpus$documents, corpus$vocab, K = n_topics, prevalence = ~department, data = corpus$data, init.type = "Spectral")
+}
+```
+####Extraction Functions
+We will be working with many lists of lists. The following functions help us extract information from lower levels of the list (e.g. access element in second list).
+```{r getting gamma and beta, eval = FALSE}
+#
+##From external Lists:
+
+#Extract CORPUS
+extract_corpus <- function(origin) stm_corpus[[origin]]
+
+# extract_dtm <- function(origin) dtms[[origin]]
+extract_dtm <- function(origin) d_cast[[origin]]
+
+#
+## From STM_corpus class
+get_docnames <-  function(corpus){names(corpus$documents)}
+
+#Extract documents
+extract_documents <- function(corpus) corpus$documents
+#Extract vocab
+extract_vocab     <- function(corpus) corpus$vocab
+#Extract data
+extract_data     <- function(corpus) corpus$data
+
+
+#
+##From Partition
+
+#Extract heldout docs
+extract_held_doc <- function(heldout) heldout$documents#[[1]]
+#Extract herlout vocab
+extract_held_vocab <- function(heldout) heldout$vocab#[[1]]
+#Extract missing
+extract_helout_missing <- function(heldout) heldout$missing#[[1]]
+
+#
+## MODEL HELDOUT
+my_model <- function(heldout){
+  
+  docs <- heldout$documents[[1]]
+  voc  <- heldout$vocab
+  k    <- n_topics 
+  
+  Model <- stm(docs, voc, 5, init.type = "Spectral")
+  
+  return(Model)
+}
+
+#
+##From Model
+#tidy gamma
+my_tidy_gamma <- function(Model, doc_names){
+  tidy(Model, matrix = "gamma", document_names = doc_names)
+  }
+
+#extract 
+
+#extract Distributions (Gamma/Beta)
+get_distributions <- function(model, distrib_str){ #input gamma or beta
+  tidy(model, matrix = distrib_str)        %>%
+    mutate(topic = paste("Topic", topic) ) %>%
+      arrange(topic, desc(!!sym(distrib_str)))}
+
+```
+####Inspection functions
+The following functions allow us to inspect the results from our models(inspect distributions and get kw):
+```{r}
+get_top_terms_topic <- function(d_beta){
+  data.frame(d_beta) %>%
+    group_by(topic) %>%
+    top_n(10, beta) %>%
+    select(topic, term) %>%
+    group_by(topic) %>%
+    summarise(top_words = list(term))
+  
+}
+
+get_top_topics_course <- function(d_gamma){
+  data.frame(d_gamma) %>%
+    group_by(document) %>%
+    top_n(5, gamma) %>%
+    select(document, topic) %>%
+    summarise(top_topic = list(topic))
+}
+
+get_kw <- function(d_beta){
+  data.frame(d_beta) %>%
+    group_by(topic) %>%
+    top_n(3, beta) %>%
+    ungroup()%>%
+    pull(term)%>%
+    unique()
+}
+```
+##Find Number of topics
+Note:Finding the number of topics takes a while.
+
+STM requires that we define the number of topics that are present in the data, since we do not know this in advance, we train different STM models for varying values of K, and compare how well they apporach the lower bound, and how well they predict heldout vocabulary for different documents. We do this using the `searchK`function from the `STM`package. 
+###SearchK
+For the evaluation we retain 50% of the vocabulary of 10% of the documents in our data to see how well each model predicts it. We use a Spectral initialization, and search on topics ranging from 5 to 150 by 5.
+This step takes some time, so we also record the time taken.
+
+We train our models for catalogues and manuals separately:
+
+####For Catalogues:
+```{r findK catalogues}
+K <- seq(5, 150, by = 5)
+
+time_1 <- Sys.time()
+
+catalogues_results_searchK <- searchK(stm_corpus$catalogues$documents, stm_corpus$catalogues$vocab, K = K, data = stm_corpus$catalogues$data, prevalence = ~department, verbose = F) #heldout documents are around 10% floor(0.1 * length(docs))  and proportion= 0.5
+
+time_2 <- Sys.time() 
+```
+The time taken to search for the number of topics in the catalogues was:  (1.072 hours for  30 topics: 5-150 by 5)
+```{r}
+print("The time taken for SearchK on the catalogues was: ")
+print(time_2 - time_1)
+```
+####For Manuals
+```{r findK manuals}
+K <- seq(5,150, by = 5)
+
+time_1_m <- Sys.time()
+
+manuals_results_searchK <- searchK(stm_corpus$manuals$documents, stm_corpus$manuals$vocab, K = K, data = stm_corpus$manuals$data, prevalence =~department, verbose = F) #heldout documents are around 10% floor(0.1 * length(docs))  and proportion= 0.5
+
+time_2_m <- Sys.time() 
+```
+The time taken to search for the number if topics in the manuals was: 4.40 hrs
+```{r print time}
+print("The time taken for SearchK on the manuals was: ")
+print(time_2_m - time_1_m)
+```
+
+NOTE: Here we need to find a way to select from searchK the best model for us. We might want to specify a threashold that we don't want to go below. we want semantic coherence to be high and exclusivity too.
+
+#### Inspecting Region of Interest
+We see that the residual does a weird jump for the catalogues between 65 and 75, we therefore run search K again for more topics between 50 and 80.  
+
+Took 47.59 mins
+```{r findK second run}
+K <- seq(50, 80, by = 1)
+
+time_1_cats_2 <- Sys.time()
+
+catalogues_2results_searchK <- searchK(stm_corpus$catalogues$documents, stm_corpus$catalogues$vocab, K = K, data = stm_corpus$catalogues$data, prevalence =~department, verbose = F) #heldout documents are around 10% floor(0.1 * length(docs))  and proportion= 0.5
+
+time_2_cats_2 <- Sys.time() #Took 47.59 mins
+```
+This suggests around 53 topics. They have high semantic coherence and heldout likelihood. With the residuals something really weird happens at 70 topics. 
+```{r}
+print( paste( "The time taken for detailed SearchK on the catalogues was:
+              ", (time_2_cats_2 - time_1_cats_2), 
+              sep = "" ) )
+```
+#Manuals:
+```{r findK second run manuals}
+K <- seq(25, 75, by = 2)
+
+time_1_mans_2 <- Sys.time()
+
+manuals_2results_searchK <- searchK(stm_corpus$manuals$documents, stm_corpus$manuals$vocab, K = K, data = stm_corpus$manuals$data, prevalence =~department, verbose = F) #heldout documents are around 10% floor(0.1 * length(docs))  and proportion= 0.5
+
+time_2_mans_2 <- Sys.time() 
+```
+The time:
+```{r}
+print( paste( "The time taken for detailed SearchK on the manuals was:
+              ", (time_2_mans_2 - time_1_mans_2), 
+              sep = "" ) )
+```
+
+####Visualize results
+```{r calculating statistic}
+catalogues_2results_searchK$results %>%
+#catalogues_results_searchK$results %>% 
+  gather(key = "Measure", value = "value", exclus:lbound) %>%
+  ggplot(aes(x = K, y  = value))+
+  geom_point()+
+  geom_line()+
+  facet_grid(Measure ~., scales = "free")
+
+catalogues_results_searchK$results %>% 
+  summary()
+  gather(key = "Measure", value = "value", exclus:lbound) %>%
+  group_by(Measure) %>%
+  summary()
+  # summarise()
+
+manuals_results_searchK$results %>%
+  gather(key = "Measure", value = "value", exclus:lbound) %>%
+  ggplot(aes(x = K, y  = value))+
+  geom_point()+
+  geom_line()+
+  facet_grid(Measure ~., scales = "free")
+
+manuals_results_searchK$results %>% summary() 
+  gather(key = "Measure", value = "value", exclus:lbound) %>%
+  group_by(Measure) %>%
+  summary()
+  
+```
+```{r}
+save(catalogues_results_searchK, manuals_results_searchK, 
+     catalogues_2results_searchK, manuals_2results_searchK, 
+     file = "./Output/SearchK.R")
+```
+
+#Alpha and Beta change
+An integral part of topic models are the parameters alpha and beta. With spectral initialization, we skip over the need to determine these. However, LDA initialization gives us direct control. 
+
+Parameters alpha and beta affect the likelihood of the distributions in the dirichlet. A parameter = 1, assigns probability distributions equal likelihood. A parameter >1 prefers equiprobable distributions(eg. for two outcomes [0.5, 0.5] is prefered over [0.9, 0.1]), and a parameter of < 1 prefers less equitable distributions ([0.9, 0.1] is prefered over [0.5, 0.5]). We explore the 
+ 
+nits
+Sets the number of iterations for collapsed gibbs sampling in LDA initializations. Defaults to 50
+
+burnin
+Sets the burnin for collapsed gibbs sampling in LDA intializations. Defaults to 25
+
+alpha
+Sets the prevalence hyperparameter in collapsed gibbs sampling in LDA initializations. Defaults to 50/K
+
+eta
+Sets the topic-word hyperparameter in collapsed gibbs sampling in LDa intializations. Defaults to .01
+```{r stm alpha and beta}
+stm_eta <- function(eta, corpus){ #, data aplpha 
+  
+  STM_model <- stm(corpus$documents, 
+                   corpus$vocab, 
+                   K = 54, 
+                   prevalence = ~department, 
+                   data = corpus$data, 
+                   init.type = "LDA", 
+                   control = list(eta = eta))
+  
+}
+
+stm_alpha <- function(alpha, corpus){ #, data aplpha 
+  STM_model <- stm(corpus$documents, 
+                   corpus$vocab, 
+                   K = 54, 
+                   prevalence = ~department, 
+                   data = corpus$data, 
+                   init.type = "LDA", 
+                   control = list(alpha = alpha))
+}
+
+
+```
+
+Vary alpha values (LDA initialization takes significantly longer to run) 
+the last model took 321 iterations.
+```{r different alpha}
+#time--
+time_a <- Sys.time()
+
+
+alphas <-c(0.1, 0.5, 0.9, 1, 2) #seq(0.1, 1, by =0.1)
+
+#--Catalogues:
+stm_alpha_catalogues <- tibble(
+  #Repeat each topic number twice (once for overview and once for manual)
+alpha_value = alphas #rep(alphas, each = length(d_text))
+) %>%
+  mutate(
+  #Identification information
+  Origin     =  "catalogues",#rep(c("catalogues", "manuals"), length(alphas)),         
+  #STM Corpus
+  Corpus           = pmap(.l = list(Origin),   .f = extract_corpus),
+  #Model
+  Model  = pmap(.l = list(alpha = alpha_value, corpus = Corpus), .f = stm_alpha)
+  )
+
+#time--
+time_b_cat <- Sys.time()
+
+#--Manuals:
+stm_alpha_manuals <- tibble(
+  #Repeat each topic number twice (once for overview and once for manual)
+alpha_value = alphas #rep(alphas, each = length(d_text))
+) %>%
+  mutate(
+  #Identification information
+  Origin     =  "manuals",#rep(c("catalogues", "manuals"), length(alphas)),         
+  #STM Corpus
+  Corpus           = pmap(.l = list(Origin),   .f = extract_corpus),
+  #Model
+  Model  = pmap(.l = list(alpha = alpha_value, corpus = Corpus), .f = stm_alpha)
+  )
+
+#time--
+time_b_man <- Sys.time()
+
+```
+The time taken was:
+```{r}
+print("The time for Catatlogues: ")
+print(time_b_cat - time_a)
+
+print("The time for Manuals: ")
+print(time_b_man - time_b_cat)
+
+print("The total time: ")
+print(time_b_man - time_a)
+```
+
+```{r different etas}
+etas <- c(0.1, 0.5, 0.9) #seq(0.1, 1, by =0.1)
+
+#Catalogues:
+stm_eta_catalogues <- tibble(
+  #Repeat each topic number twice (once for overview and once for manual)
+eta_value = etas #rep(alphas, each = length(d_text))
+) %>%
+  mutate(
+  #Identification information
+  Origin     =  "catalogues",#rep(c("catalogues", "manuals"), length(alphas)),         
+  #STM Corpus
+  Corpus           = pmap(.l = list(Origin),   .f = extract_corpus),
+  #Model
+  Model  = pmap(.l = list(eta = eta_value, corpus = Corpus), .f = stm_eta)
+  )
+
+#Manuals
+stm_eta_manuals <- tibble(
+  #Repeat each topic number twice (once for overview and once for manual)
+  
+eta_value = etas #rep(alphas, each = length(d_text))
+) %>%
+  mutate(
+  #Identification information
+  Origin     =  "manuals", #rep(c("catalogues", "manuals"), length(alphas)),         
+  #STM Corpus
+  Corpus           = pmap(.l = list(Origin),   .f = extract_corpus),
+  #Model
+  Model  = pmap(.l = list(eta = eta_value, corpus = Corpus), .f = stm_eta)
+  )
+
+```
+
+#Proportions
+In order to see how the topics are distributed we examine the proportions of:
+a) each document about a topic
+b) each topic around words. 
+```{r proportions}
+```
+#Test inspection
+Note:the topic numbers are not the same for the same model
+```{r inspecting alpha models}
+
+topics_to_inspect <- sample(1:54, 4)
+#visualize
+stm_alpha_manuals$Model[[1]] %>% 
+  tidy("beta") %>% 
+  filter(topic %in% topics_to_inspect) %>%
+  group_by(topic) %>% 
+  top_n(100, wt = beta) %>%
+  arrange(desc(beta)) %>%
+  ggplot(aes(x = term, y=beta)) +
+  geom_bar(stat = "identity") +
+  facet_grid(~topic, scales = "free")
+
+#mean and median do they make a difference?
+stm_alpha_manuals$Model[[1]] %>% 
+    tidy("beta") %>% 
+  group_by(topic) %>% 
+  top_n(100, wt = beta) %>%
+  group_by(topic) %>% 
+  summarise(mean = mean(beta), median = median(beta), max = max(beta), min = min(beta)) %>%
+  summarise(mean_of_mean = mean(mean), mean_of_median = mean(median)) %>% 
+  mutate(difference = mean_of_mean-mean_of_median)
+
+stm_alpha_catalogues$Model[[3]] %>% 
+  tidy("beta") %>% 
+  group_by(topic) %>% 
+  filter(topic == 50) %>%
+  top_n(100, wt = beta) %>%
+  arrange(desc(beta)) %>%
+  ggplot(aes(x = term, y=beta)) +
+  geom_bar(stat = "identity")
+
+```
+##Model Tibbles
+We know that the topic model we need is in the region of about 50 and 80 topics, therefore we fit the topics between 50 and 80 by 2, and save them in a tibble for use in app:
+(This took  4.198888 hours.)
+```{r models in tibble}
+#time
+initial_time <- Sys.time()
+
+#Stm
+topic_numbers <- seq(from = 50, to = 80, by = 2) # seq(from = 5, to = 20, by = 5) #seq(from = 5, to = 150, by = 5)
+
+stm_model <- tibble(
+  #repeat each topic number twice (once for overview and once for manual)
+  n_topic = rep(topic_numbers, each = length(d_text)) ) %>%
+  
+  mutate(
+  #Identification information
+  Origin     = rep(c("catalogues", "manuals"), length(topic_numbers)),         
+  `Topic ID` = paste(Origin, n_topic, sep = "_"),
+  #STM Corpus
+  Corpus           = pmap(.l = list(Origin),   .f = extract_corpus), 
+  
+  #Model
+  Model  = pmap(.l = list(n_topic, Corpus), .f = my_stm))
+
+end_time <- Sys.time()
+```
+
+```{r}
+print(end_time - initial_time)
+```
+
+Continuation with the cleaning: takes around a minute.
+```{r}
+evaluated_stm <- stm_model %>% 
+  
+  mutate(
+    document_names = map(Corpus, get_docnames),
+    Documents = map(Corpus, extract_documents),
+    
+  #Evaluation
+  Exclusivity        = map(Model, exclusivity),
+  semantic_coherence = pmap(.l = list(Model, Documents), .f =semanticCoherence, M = 10),
+  
+  #Beta distribution
+  Beta = map(Model, tidy, "beta"),
+
+  #Gamma distribution
+  Gamma = pmap(list(Model, document_names), my_tidy_gamma),
+
+  #top words per topic
+  top_terms_topic = map(Beta, .f = get_top_terms_topic),
+
+  #top topics per course
+  top_topic_course = map(Gamma, .f = get_top_topics_course), 
+
+  #Select keywords
+  kw = map(Beta, .f = get_kw)
+
+)
+```
+
+```{r different beta}
+
+# save(evaluated_stm, file = "Output/STM_model_tibble.RData")
+```
+###Saving Results
+```{r save}
+#saving
+# my_models <-  list(use = stm_model, eval = stm_eval_model)
+# save(my_models , file="STM_models.RDATA")
+```
+
+```{r clean workspace}
+#clean workspace
+rm(# Generating functions:
+  my_stm, my_stm_eval,
+  #Extraction Functions
+  extract_dtm, extract_corpus, extract_documents, extract_vocab, extract_data,
+  extract_held_doc, extract_held_vocab, extract_helout_missing, 
+  my_model, my_tidy_gamma,
+  get_top_terms_topic, 
+  get_top_topics_course,
+  get_kw
+  )
+```
+TO DO: add titles vector: `Course Titles` with `Course ID`,`Course Title`, `department` columns for each model.
+
+#Experiments:
+```{r extract topic model}
+
+select_topic_model <- function(origin, no_topics){
+  model <- evaluated_stm %>% 
+    filter(Origin == origin & n_topic == no_topics) %>%
+    pull(Model)
+  
+  model <- model[[1]]
+  return(model)
+}
+
+#test <- select_topic_model("manuals", 60)
+
+plot.STM(test, "labels", topics = c(1:5)) #this doesn't work anymore
+```
+
+#New Documents
+##Align vocabulary
+```{r align vocab}
+#back up current code
+d_text1 <- d_text
+
+#single case: Fasos topics
+fasos_docs <- d_text$catalogues %>%
+  filter(department == "European_studies") %>%
+  select(-department)
+
+fasos_cast <- my_cast_dtm(fasos_docs)
+
+```
+
+##Fit new docs
+```{r}
+# fitting:
+out         <- asSTMCorpus(fasos_cast)
+newdocs     <- alignCorpus(new = out, old.vocab = test$vocab)
+fasos_theta <- fitNewDocuments(model = test$model, documents = newdocs$documents) #returns a course by topic matrix
+
+my_names <- names(newdocs$documents)
+
+fasos_theta$theta #nice kind of makes sense
+plot.STM(model, type ="summary")
+
+rownames(fasos_theta$theta) <- my_names
+
+new_courses_theta           <- fasos_theta$theta
+
+set_names(fasos_theta$theta, old = colnames(fasos_theta$theta), new = paste0("Topic", 1:10))
+
+new_courses_theta %>%  mutate(Topic = paste("Topic_", rownames))
+```
+
+#Experiment
+Note: this is working but no idea what it means
+```{r experoment}
+effect <- estimateEffect(formula = c(26, 51, 39) ~department, stmobj = test$model, metadata = test$corpus$data)
+
+plot(effect, "department", method = "pointestimate") # can't plot for some weird reason.
+```
+
+
+#Accesing functions for models
+```{r}
+give_data <- function(your_tibble, topics, origin){
+  
+  tmp <- your_tibble %>%
+    filter(n_topic == topics) %>%
+    filter(Origin == origin)
+  
+  corpus    <-  tmp$Corpus[[1]]
+  doc       <-  corpus$documents
+  vocab     <- corpus$vocab
+  model     <- tmp$Model[[1]]
+  doc_names <- tmp$document_names
+  
+  b <- list(corpus = corpus, doc = doc, vocab = vocab, model = model, doc_names = doc_names)
+  return(b)
+
+}
+
+
+test <- give_data(evaluated_stm, 54, "catalogues")
+```
+
+```{r}
+load("./Output/app_model.RDATA")
+```
+
+```{r}
+app_stm <- evaluated_stm %>% 
+  filter(n_topic == 54 & Origin == "catalogues") %>% 
+  select(-semantic_coherence,-Exclusivity, -Documents, -top_terms_topic, -top_topic_course)
+
+save(app_stm, file = "./App/Recommender System/app_stm.RDATA")
+
+```
+
+NOTES: Using stm topic models makes some words very much prevalent withing one topic. I believe this is because of spectral initialization, but not sure. A different measure for specifying the key words is needed, since mostly they are dominated by method student etc
+
+REFLECTION: the stm model works a bit less well than the other model.
+
+Course recommendations based on article are not very good. It's not correctly classifying the document. 
+
+
